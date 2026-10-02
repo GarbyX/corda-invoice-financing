@@ -4,67 +4,67 @@ import co.paralleluniverse.fibers.Suspendable
 import net.corda.core.flows.*
 import net.corda.core.identity.*
 import net.corda.core.utilities.ProgressTracker
-import net.corda.core.flows.FinalityFlow
-
-import net.corda.core.flows.CollectSignaturesFlow
-
 import net.corda.core.transactions.SignedTransaction
-
-import java.util.stream.Collectors
-
-import net.corda.core.flows.FlowSession
-
-import net.corda.core.identity.Party
-
-import com.garby.contracts.TemplateContract
-
 import net.corda.core.transactions.TransactionBuilder
-
-import com.garby.states.TemplateState
+import net.corda.core.contracts.Amount
 import net.corda.core.contracts.requireThat
-import net.corda.core.identity.AbstractParty
+import com.garby.contracts.InvoiceContract
+import com.garby.contracts.states.InvoiceState
+import com.garby.contracts.states.InvoiceStatus
+import java.time.Instant
+import java.util.Currency
 
-
-// *********
-// * Flows *
-// *********
 @InitiatingFlow
 @StartableByRPC
-class Initiator(private val receiver: Party) : FlowLogic<SignedTransaction>() {
+class Initiator(
+    private val buyer: Party,
+    private val faceValue: Amount<Currency>,
+    private val dueDate: Instant
+) : FlowLogic<SignedTransaction>() {
+
     override val progressTracker = ProgressTracker()
 
     @Suspendable
     override fun call(): SignedTransaction {
-        //Hello World message
-        val msg = "Hello-World"
-        val sender = ourIdentity
+        val supplier = ourIdentity
 
-        // Step 1. Get a reference to the notary service on our network and our key pair.
-        // Note: ongoing work to support multiple notary identities is still in progress.
-        val notary = serviceHub.networkMapCache.getNotary( CordaX500Name.parse("O=Notary,L=London,C=GB"))
+        // 1. Get a reference to the notary service on our network
+        val notary = serviceHub.networkMapCache.getNotary(CordaX500Name.parse("O=Notary,L=London,C=GB"))
+            ?: throw FlowException("Notary not found.")
 
-        //Compose the State that carries the Hello World message
-        val output = TemplateState(msg, sender, receiver)
+        // 2. Compose the State matching your InvoiceState definition
+        val output = InvoiceState(
+            supplier = supplier,
+            buyer = buyer,
+            faceValue = faceValue,
+            dueDate = dueDate,
+            status = InvoiceStatus.ISSUED
+        )
 
-        // Step 3. Create a new TransactionBuilder object.
+        // 3. Create a new TransactionBuilder and assign the correct "Issue" command
         val builder = TransactionBuilder(notary)
-                .addCommand(TemplateContract.Commands.Create(), listOf(sender.owningKey, receiver.owningKey))
-                .addOutputState(output)
+            .addCommand(InvoiceContract.Commands.Issue(), listOf(supplier.owningKey, buyer.owningKey))
+            .addOutputState(output)
 
-        // Step 4. Verify and sign it with our KeyPair.
+        // Set a time-window because InvoiceContract requires it for the Issue command
+        builder.setTimeWindow(net.corda.core.contracts.TimeWindow.untilOnly(dueDate))
+        // 4. Verify and sign it with our KeyPair
         builder.verify(serviceHub)
         val ptx = serviceHub.signInitialTransaction(builder)
 
+        // 5. Gather counterparty sessions using native Kotlin lists instead of Java streams
+        // This solves the 'toList()' compilation type-inference failure completely
+        val otherParties = output.participants
+            .filterIsInstance<Party>()
+            .filter { it != ourIdentity }
 
-        // Step 6. Collect the other party's signature using the SignTransactionFlow.
-        val otherParties: MutableList<Party> = output.participants.stream().map { el: AbstractParty? -> el as Party? }.collect(Collectors.toList())
-        otherParties.remove(ourIdentity)
-        val sessions = otherParties.stream().map { el: Party? -> initiateFlow(el!!) }.collect(Collectors.toList())
+        val sessions = otherParties.map { initiateFlow(it) }
 
+        // 6. Collect the other party's signature
         val stx = subFlow(CollectSignaturesFlow(ptx, sessions))
 
-        // Step 7. Assuming no exceptions, we can now finalise the transaction
-        return subFlow<SignedTransaction>(FinalityFlow(stx, sessions))
+        // 7. Finalise the transaction
+        return subFlow(FinalityFlow(stx, sessions))
     }
 }
 
@@ -74,11 +74,10 @@ class Responder(val counterpartySession: FlowSession) : FlowLogic<SignedTransact
     override fun call(): SignedTransaction {
         val signTransactionFlow = object : SignTransactionFlow(counterpartySession) {
             override fun checkTransaction(stx: SignedTransaction) = requireThat {
-               //Addition checks
+                // Additional custom checks can go here
             }
         }
         val txId = subFlow(signTransactionFlow).id
         return subFlow(ReceiveFinalityFlow(counterpartySession, expectedTxId = txId))
     }
 }
-
