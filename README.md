@@ -89,7 +89,7 @@ flow start OfferFinancingFlow invoiceId: <id>, advanceRate: 0.85
 Check state at any time with:
 
 ```
-run vaultQuery contractStateType: com.example.states.InvoiceState
+run vaultQuery contractStateType: com.garby.states.InvoiceState
 ```
 
 ## Project Structure
